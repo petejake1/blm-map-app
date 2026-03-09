@@ -5,90 +5,188 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BLM Public Lands Explorer</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { margin:0; font-family: system-ui, sans-serif; background:#111; color:white; }
-    #map { height: 80vh; width: 100%; }
-    .controls { padding: 15px; background:#1f1f1f; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    input, button, select { padding:10px; font-size:16px; border-radius:8px; }
-    button { background:#22c55e; color:black; font-weight:bold; cursor:pointer; }
-    .info { padding:15px; background:#1f1f1f; font-size:14px; }
+    body { font-family: system-ui, sans-serif; }
+    #map { height: calc(100vh - 64px); }
+    .leaflet-popup-content-wrapper { border-radius: 12px; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.3); }
+    .dark .leaflet-tile { filter: brightness(0.65) invert(0.95) contrast(1.1) hue-rotate(200deg) saturate(0.4); }
+    .sidebar { max-height: calc(100vh - 140px); overflow-y: auto; }
   </style>
 </head>
-<body>
-  <div class="controls">
-    <h1 style="margin:0 20px 0 0;">BLM Site Collections Map</h1>
-    
-    <input id="search" type="text" placeholder="Search (e.g. recreation, monument)" style="flex:1; max-width:400px;">
-    
-    <select id="collection">
-      <option value="dataset">Datasets (main)</option>
-      <option value="appAndMap">Maps & Apps</option>
-    </select>
-    
-    <button onclick="loadData()">🔄 Load / Refresh Map</button>
-    <span id="count" style="margin-left:auto; opacity:0.7;"></span>
-  </div>
+<body class="bg-zinc-950 text-white">
+  <div class="flex flex-col h-screen">
+    <!-- Top controls bar -->
+    <div class="bg-zinc-900 border-b border-zinc-700 p-3 flex items-center gap-4 flex-wrap shadow-xl">
+      <h1 class="text-2xl font-bold text-emerald-400 flex items-center gap-2">
+        BLM Public Lands Explorer
+      </h1>
 
-  <div id="map"></div>
+      <select id="collection" class="bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
+        <option value="all">All Content</option>
+        <option value="dataset" selected>Datasets (Geodata)</option>
+        <option value="appAndMap">Apps & Maps</option>
+        <option value="document">Documents</option>
+      </select>
 
-  <div class="info">
-    Click any polygon for details • Powered by BLM GBP Hub Search API • 
-    <a href="https://gbp-blm-egis.hub.arcgis.com/api/search/definition/" target="_blank" style="color:#22c55e;">View full API docs</a>
+      <input id="searchInput" type="text" placeholder="Search (recreation, monument...)" 
+             class="flex-1 max-w-md bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500">
+
+      <button onclick="performSearch()" 
+              class="bg-emerald-600 hover:bg-emerald-500 px-6 py-2 rounded-xl font-semibold transition">🔎 Search</button>
+
+      <!-- Basemap switcher -->
+      <select id="basemapSelect" onchange="changeBasemap()" class="bg-zinc-800 border border-zinc-700 rounded-xl px-4 py-2 text-sm">
+        <option value="osm">🛤️ Streets</option>
+        <option value="satellite">🛰️ Satellite</option>
+        <option value="topo">🏔️ Topographic</option>
+      </select>
+
+      <div class="flex items-center gap-3 ml-auto">
+        <!-- Auto-refresh toggle -->
+        <label class="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input type="checkbox" id="autoRefresh" checked class="w-5 h-5 accent-emerald-500">
+          <span class="text-zinc-300">Auto-refresh on pan/zoom</span>
+        </label>
+
+        <!-- Dark mode toggle -->
+        <button onclick="toggleDarkMode()" id="themeBtn"
+                class="bg-zinc-800 hover:bg-zinc-700 px-5 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2">
+          🌙 Dark
+        </button>
+      </div>
+    </div>
+
+    <div class="flex flex-1 overflow-hidden">
+      <!-- Sidebar with results -->
+      <div class="w-80 bg-zinc-900 border-r border-zinc-700 flex flex-col">
+        <div class="p-4 border-b border-zinc-700 font-semibold text-emerald-400">
+          Results (<span id="resultCount" class="font-mono">0</span>)
+        </div>
+        <div id="resultsList" class="sidebar p-3 space-y-3 text-sm"></div>
+      </div>
+
+      <!-- Map -->
+      <div class="flex-1 relative" id="map-container">
+        <div id="map"></div>
+      </div>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Initialize map (centered on BLM western US lands)
-    const map = L.map('map').setView([39.5, -105.5], 5);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+    tailwind.config = { content: ["*"] };
 
-    let geoLayer;
+    let map, geoLayer, currentBasemapLayer;
+    let allFeatures = [];
+    let debounceTimer = null;
 
-    async function loadData() {
-      const query = document.getElementById('search').value.trim();
+    const basemaps = {
+      osm: { url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", attribution: "© OpenStreetMap" },
+      satellite: { url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attribution: "© Esri" },
+      topo: { url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", attribution: "© Esri" }
+    };
+
+    function initMap() {
+      map = L.map('map', { zoomControl: true }).setView([39.0, -105.5], 5);
+
+      currentBasemapLayer = L.tileLayer(basemaps.osm.url, { attribution: basemaps.osm.attribution }).addTo(map);
+
+      // Auto-refresh on map move (debounced)
+      map.on('moveend', () => {
+        if (document.getElementById('autoRefresh').checked) {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(performSearch, 700);
+        }
+      });
+
+      performSearch(); // initial load
+    }
+
+    async function performSearch() {
+      const query = document.getElementById('searchInput').value.trim();
       const coll = document.getElementById('collection').value;
-      const url = `https://gbp-blm-egis.hub.arcgis.com/api/search/v1/collections/${coll}/items?limit=100${query ? `&q=${encodeURIComponent(query)}` : ''}`;
+      const b = map.getBounds();
+      const bbox = `${b.getWest().toFixed(4)},${b.getSouth().toFixed(4)},${b.getEast().toFixed(4)},${b.getNorth().toFixed(4)}`;
 
-      document.getElementById('count').textContent = 'Loading...';
+      let url = `https://gbp-blm-egis.hub.arcgis.com/api/search/v1/collections/${coll}/items?limit=150`;
+      if (query) url += `&q=${encodeURIComponent(query)}`;
+      url += `&bbox=${bbox}`;
 
       try {
         const res = await fetch(url);
-        const geojson = await res.json();
+        const data = await res.json();
+        allFeatures = data.features || [];
 
-        // Remove old layer
-        if (geoLayer) map.removeLayer(geoLayer);
+        document.getElementById('resultCount').textContent = allFeatures.length;
 
-        geoLayer = L.geoJSON(geojson, {
-          style: { color: "#22c55e", weight: 2, opacity: 0.8, fillOpacity: 0.2 },
-          onEachFeature: function(feature, layer) {
-            const p = feature.properties;
-            const title = p.title || 'Untitled';
-            const desc = p.description || p.snippet || 'No description';
-            const link = p.links?.find(l => l.rel === 'self')?.href || 
-                         `https://gbp-blm-egis.hub.arcgis.com/search?${p.id}`;
-            
-            layer.bindPopup(`
-              <h3 style="margin:0 0 8px;">${title}</h3>
-              <p style="margin:0 0 10px; font-size:14px;">${desc.substring(0, 200)}...</p>
-              <a href="${link}" target="_blank" style="color:#22c55e; font-weight:bold;">View on BLM Hub →</a>
-            `);
-          }
-        }).addTo(map);
-
-        // Auto-fit map to the data
-        if (geoLayer.getBounds().isValid()) map.fitBounds(geoLayer.getBounds());
-
-        document.getElementById('count').textContent = `${geojson.features.length} collections loaded`;
-      } catch(e) {
-        alert("Error loading data (check console). The API is public and usually works great.");
-        console.error(e);
+        updateSidebar();
+        renderFeaturesOnMap();
+      } catch (err) {
+        console.error("API error:", err);
       }
     }
 
-    // Load data automatically on first visit
-    window.onload = loadData;
+    function renderFeaturesOnMap() {
+      if (geoLayer) map.removeLayer(geoLayer);
+
+      geoLayer = L.geoJSON({ type: "FeatureCollection", features: allFeatures }, {
+        style: { color: "#10b981", weight: 3, opacity: 0.9, fillOpacity: 0.18 },
+        onEachFeature: (feature, layer) => {
+          const p = feature.properties;
+          const link = p.links?.find(l => l.rel === "self")?.href || "#";
+          layer.bindPopup(`
+            <div class="p-2">
+              <strong class="text-lg">${p.title || "Untitled"}</strong><br>
+              <span class="text-xs opacity-70">${p.description ? p.description.substring(0, 140) + "..." : ""}</span><br><br>
+              <a href="${link}" target="_blank" class="text-emerald-400 font-medium">View full details on BLM Hub →</a>
+            </div>
+          `);
+        }
+      }).addTo(map);
+
+      if (allFeatures.length > 0) map.flyToBounds(geoLayer.getBounds().pad(0.15));
+    }
+
+    function updateSidebar() {
+      const container = document.getElementById('resultsList');
+      container.innerHTML = '';
+
+      allFeatures.forEach((feature, index) => {
+        const p = feature.properties;
+        const item = document.createElement('div');
+        item.className = "p-4 bg-zinc-800 hover:bg-zinc-700 rounded-2xl cursor-pointer transition border border-zinc-700";
+        item.innerHTML = `
+          <div class="font-medium leading-tight">${p.title || "Untitled Collection"}</div>
+          <div class="text-xs text-zinc-400 mt-1">${p.type || ""}</div>
+        `;
+        item.onclick = () => {
+          const layer = geoLayer.getLayers()[index];
+          if (layer) {
+            map.flyToBounds(layer.getBounds());
+            layer.openPopup();
+          }
+        };
+        container.appendChild(item);
+      });
+    }
+
+    function changeBasemap() {
+      const val = document.getElementById('basemapSelect').value;
+      if (currentBasemapLayer) map.removeLayer(currentBasemapLayer);
+      currentBasemapLayer = L.tileLayer(basemaps[val].url, { attribution: basemaps[val].attribution }).addTo(map);
+    }
+
+    function toggleDarkMode() {
+      document.documentElement.classList.toggle('dark');
+      const btn = document.getElementById('themeBtn');
+      btn.textContent = document.documentElement.classList.contains('dark') ? '☀️ Light' : '🌙 Dark';
+    }
+
+    // Start the app
+    window.onload = () => {
+      initMap();
+    };
   </script>
 </body>
 </html>
