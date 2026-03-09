@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLM Public Lands Explorer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { margin:0; font-family: system-ui, sans-serif; background:#111; color:white; }
+    #map { height: 80vh; width: 100%; }
+    .controls { padding: 15px; background:#1f1f1f; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    input, button, select { padding:10px; font-size:16px; border-radius:8px; }
+    button { background:#22c55e; color:black; font-weight:bold; cursor:pointer; }
+    .info { padding:15px; background:#1f1f1f; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <h1 style="margin:0 20px 0 0;">BLM Site Collections Map</h1>
+    
+    <input id="search" type="text" placeholder="Search (e.g. recreation, monument)" style="flex:1; max-width:400px;">
+    
+    <select id="collection">
+      <option value="dataset">Datasets (main)</option>
+      <option value="appAndMap">Maps & Apps</option>
+    </select>
+    
+    <button onclick="loadData()">🔄 Load / Refresh Map</button>
+    <span id="count" style="margin-left:auto; opacity:0.7;"></span>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="info">
+    Click any polygon for details • Powered by BLM GBP Hub Search API • 
+    <a href="https://gbp-blm-egis.hub.arcgis.com/api/search/definition/" target="_blank" style="color:#22c55e;">View full API docs</a>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Initialize map (centered on BLM western US lands)
+    const map = L.map('map').setView([39.5, -105.5], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let geoLayer;
+
+    async function loadData() {
+      const query = document.getElementById('search').value.trim();
+      const coll = document.getElementById('collection').value;
+      const url = `https://gbp-blm-egis.hub.arcgis.com/api/search/v1/collections/${coll}/items?limit=100${query ? `&q=${encodeURIComponent(query)}` : ''}`;
+
+      document.getElementById('count').textContent = 'Loading...';
+
+      try {
+        const res = await fetch(url);
+        const geojson = await res.json();
+
+        // Remove old layer
+        if (geoLayer) map.removeLayer(geoLayer);
+
+        geoLayer = L.geoJSON(geojson, {
+          style: { color: "#22c55e", weight: 2, opacity: 0.8, fillOpacity: 0.2 },
+          onEachFeature: function(feature, layer) {
+            const p = feature.properties;
+            const title = p.title || 'Untitled';
+            const desc = p.description || p.snippet || 'No description';
+            const link = p.links?.find(l => l.rel === 'self')?.href || 
+                         `https://gbp-blm-egis.hub.arcgis.com/search?${p.id}`;
+            
+            layer.bindPopup(`
+              <h3 style="margin:0 0 8px;">${title}</h3>
+              <p style="margin:0 0 10px; font-size:14px;">${desc.substring(0, 200)}...</p>
+              <a href="${link}" target="_blank" style="color:#22c55e; font-weight:bold;">View on BLM Hub →</a>
+            `);
+          }
+        }).addTo(map);
+
+        // Auto-fit map to the data
+        if (geoLayer.getBounds().isValid()) map.fitBounds(geoLayer.getBounds());
+
+        document.getElementById('count').textContent = `${geojson.features.length} collections loaded`;
+      } catch(e) {
+        alert("Error loading data (check console). The API is public and usually works great.");
+        console.error(e);
+      }
+    }
+
+    // Load data automatically on first visit
+    window.onload = loadData;
+  </script>
+</body>
+</html>
